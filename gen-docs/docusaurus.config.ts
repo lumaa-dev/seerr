@@ -8,8 +8,8 @@ const config: Config = {
   tagline: 'One Stop Solution for all your media request needs',
   favicon: 'img/favicon.ico',
 
-  url: 'https://docs.seerr.dev',
-  baseUrl: '/',
+  url: 'https://lumaa-dev.github.io/',
+  baseUrl: '/seerr/',
   trailingSlash: true,
 
   future: {
