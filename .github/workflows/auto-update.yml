@@ -1,0 +1,90 @@
+# .github/workflows/sync-upstream.yml
+---
+name: Auto-update
+
+on:
+  schedule:
+    - cron: '0 3 * * 0' # every Sunday at 03:00 UTC
+  workflow_dispatch: # allows manual trigger from the Actions tab
+
+permissions:
+  contents: write
+  issues: write # only needed if you want the auto-filed issue on conflict
+
+env:
+  UPSTREAM_URL: https://github.com/seerr-team/seerr.git
+  BRANCH: develop # branch to sync — change if your fork tracks a different one
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: ${{ env.BRANCH }}
+          persist-credentials: true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config pull.rebase false
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch upstream
+
+      - name: Merge upstream into ${{ env.BRANCH }}
+        id: merge
+        run: |
+          if git merge "upstream/${BRANCH}" --no-edit; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo "files<<EOF" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      - name: Push merged changes
+        if: steps.merge.outputs.conflict == 'false'
+        run: git push origin "${BRANCH}"
+
+      - name: File an issue on conflict
+        if: steps.merge.outputs.conflict == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8
+        with:
+          script: |
+            const files = `${{ steps.merge.outputs.files }}`.trim();
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Upstream sync failed: merge conflict',
+              body: [
+                `The scheduled sync from \`seerr-team/seerr\` (branch \`${process.env.BRANCH}\`) hit a merge conflict and was aborted. Local changes were **not** overwritten.`,
+                '',
+                'Conflicting files:',
+                '```',
+                files || '(unable to list — check the workflow run log)',
+                '```',
+                '',
+                `See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details. You'll need to resolve this manually, e.g.:`,
+                '```bash',
+                `git remote add upstream ${process.env.UPSTREAM_URL}`,
+                'git fetch upstream',
+                `git merge upstream/${process.env.BRANCH}`,
+                '# resolve conflicts, then commit & push',
+                '```',
+              ].join('\n'),
+              labels: ['upstream-sync', 'conflict'],
+            });
+
+      - name: Fail the job on conflict
+        if: steps.merge.outputs.conflict == 'true'
+        run: |
+          echo "::error::Merge conflict with upstream/${BRANCH} — merge aborted, local changes preserved."
+          exit 1
