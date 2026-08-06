@@ -1,10 +1,8 @@
-# .github/workflows/sync-upstream.yml
----
-name: Auto-update
+name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 3 * * 0' # every Sunday at 03:00 UTC
+    - cron: '0 3 * * 0'
   workflow_dispatch: # allows manual trigger from the Actions tab
 
 permissions:
@@ -13,7 +11,8 @@ permissions:
 
 env:
   UPSTREAM_URL: https://github.com/seerr-team/seerr.git
-  BRANCH: develop # branch to sync — change if your fork tracks a different one
+  UPSTREAM_REPO: seerr-team/seerr
+  BRANCH: main # your fork's branch to sync — change if different
 
 jobs:
   sync:
@@ -32,15 +31,41 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config pull.rebase false
 
+      - name: Get latest stable release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::Could not resolve latest release tag from ${UPSTREAM_REPO}"
+            exit 1
+          fi
+          echo "Latest stable release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Add upstream remote
         run: |
           git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch upstream
 
-      - name: Merge upstream into ${{ env.BRANCH }}
-        id: merge
+      - name: Fetch release tag
         run: |
-          if git merge "upstream/${BRANCH}" --no-edit; then
+          git fetch upstream "refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
+
+      - name: Check if already up to date
+        id: check
+        run: |
+          if git merge-base --is-ancestor "${{ steps.release.outputs.tag }}" HEAD; then
+            echo "uptodate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "uptodate=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge release tag into ${{ env.BRANCH }}
+        id: merge
+        if: steps.check.outputs.uptodate == 'false'
+        run: |
+          if git merge "${{ steps.release.outputs.tag }}" --no-edit -m "chore: sync with ${{ steps.release.outputs.tag }}"; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
             echo "conflict=true" >> "$GITHUB_OUTPUT"
@@ -51,7 +76,7 @@ jobs:
           fi
 
       - name: Push merged changes
-        if: steps.merge.outputs.conflict == 'false'
+        if: steps.check.outputs.uptodate == 'false' && steps.merge.outputs.conflict == 'false'
         run: git push origin "${BRANCH}"
 
       - name: File an issue on conflict
@@ -60,12 +85,13 @@ jobs:
         with:
           script: |
             const files = `${{ steps.merge.outputs.files }}`.trim();
+            const tag = `${{ steps.release.outputs.tag }}`;
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'Upstream sync failed: merge conflict',
+              title: `Upstream sync failed: merge conflict with ${tag}`,
               body: [
-                `The scheduled sync from \`seerr-team/seerr\` (branch \`${process.env.BRANCH}\`) hit a merge conflict and was aborted. Local changes were **not** overwritten.`,
+                `The scheduled sync from \`${process.env.UPSTREAM_REPO}\` release \`${tag}\` (branch \`${process.env.BRANCH}\`) hit a merge conflict and was aborted. Local changes were **not** overwritten.`,
                 '',
                 'Conflicting files:',
                 '```',
@@ -75,8 +101,8 @@ jobs:
                 `See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details. You'll need to resolve this manually, e.g.:`,
                 '```bash',
                 `git remote add upstream ${process.env.UPSTREAM_URL}`,
-                'git fetch upstream',
-                `git merge upstream/${process.env.BRANCH}`,
+                `git fetch upstream refs/tags/${tag}:refs/tags/${tag}`,
+                `git merge ${tag}`,
                 '# resolve conflicts, then commit & push',
                 '```',
               ].join('\n'),
@@ -86,5 +112,5 @@ jobs:
       - name: Fail the job on conflict
         if: steps.merge.outputs.conflict == 'true'
         run: |
-          echo "::error::Merge conflict with upstream/${BRANCH} — merge aborted, local changes preserved."
+          echo "::error::Merge conflict with ${{ steps.release.outputs.tag }} — merge aborted, local changes preserved."
           exit 1
