@@ -12,7 +12,7 @@ permissions:
 env:
   UPSTREAM_URL: https://github.com/seerr-team/seerr.git
   UPSTREAM_REPO: seerr-team/seerr
-  BRANCH: main # your fork's branch to sync — change if different
+  BRANCH: develop # your fork's branch to sync — change if different
 
 jobs:
   sync:
