@@ -13,6 +13,14 @@ env:
   UPSTREAM_URL: https://github.com/seerr-team/seerr.git
   UPSTREAM_REPO: seerr-team/seerr
   BRANCH: develop # your fork's branch to sync — change if different
+  # Paths where YOUR version always wins (one git pathspec per line).
+  # "*" also matches across folders, so "*.md" covers every .md in the repo.
+  # A trailing "/" targets a whole directory.
+  IGNORED_PATHS: |
+    *.md
+    .github/
+    .husky/
+    .vscode/
 
 jobs:
   sync:
@@ -65,14 +73,40 @@ jobs:
         id: merge
         if: steps.check.outputs.uptodate == 'false'
         run: |
-          if git merge "${{ steps.release.outputs.tag }}" --no-edit -m "chore: sync with ${{ steps.release.outputs.tag }}"; then
-            echo "conflict=false" >> "$GITHUB_OUTPUT"
-          else
+          TAG="${{ steps.release.outputs.tag }}"
+          mapfile -t PATHSPECS < <(printf '%s\n' "$IGNORED_PATHS" | sed '/^[[:space:]]*$/d')
+
+          # 1. Merge without committing so we can filter paths first
+          git merge "$TAG" --no-commit --no-ff || true
+
+          if ! git rev-parse -q --verify MERGE_HEAD > /dev/null; then
+            echo "::error::git merge could not even start"
+            exit 1
+          fi
+
+          # 2. Put ignored paths back to our version (including conflicted ones)
+          if [ "${#PATHSPECS[@]}" -gt 0 ]; then
+            git diff -z --name-only HEAD -- "${PATHSPECS[@]}" | while IFS= read -r -d '' f; do
+              if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                git checkout HEAD -- "$f"   # exists on our side: restore it
+              else
+                git rm -qf -- "$f"          # only added upstream: drop it
+              fi
+            done
+          fi
+
+          # 3. Any conflict left is in a path we actually care about
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          if [ -n "$CONFLICTS" ]; then
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             echo "files<<EOF" >> "$GITHUB_OUTPUT"
-            git diff --name-only --diff-filter=U >> "$GITHUB_OUTPUT"
+            echo "$CONFLICTS" >> "$GITHUB_OUTPUT"
             echo "EOF" >> "$GITHUB_OUTPUT"
             git merge --abort
+          else
+            # Commits even if nothing changed, so the tag is recorded as merged
+            git commit -m "chore: sync with $TAG"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Push merged changes
